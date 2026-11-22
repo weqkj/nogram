@@ -5,7 +5,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.*
-import androidx.compose.ui.platform.LocalContext
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import app.nogram.plugins.AI_PLUGIN_PROMPT
+import app.nogram.plugins.LoadedPlugin
+import app.nogram.plugins.PluginManifest
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -17,15 +25,22 @@ import app.nogram.ui.theme.NogramTheme
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private var pending by mutableStateOf<LoadedPlugin?>(null)
+
+    /** Читает .plugin, но не ставит: сначала пользователь подтверждает права. */
+    private fun readPlugin(uri: Uri) {
+        val app = application as NogramApp
+        runCatching { contentResolver.openInputStream(uri)!!.use { app.plugins.parse(it) } }
+            .onSuccess { pending = it }
+            .onFailure { Toast.makeText(this, "Не удалось прочитать плагин: ${it.message}", Toast.LENGTH_LONG).show() }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val app = application as NogramApp
 
-        // Установка .plugin по тапу на файл — с подтверждением прав в реальном UI (TODO диалог)
-        intent?.data?.let { uri ->
-            runCatching { contentResolver.openInputStream(uri)?.use { app.plugins.install(app.plugins.parse(it)) } }
-        }
+        intent?.data?.let { readPlugin(it) }
 
         setContent {
             val scope = rememberCoroutineScope()
@@ -36,6 +51,10 @@ class MainActivity : ComponentActivity() {
             // TODO: myId берётся из TDLib после входа; для владельца пока сравнение с OWNER_ID
             val myId = BuildConfig.OWNER_ID
             val isOwner = myId == BuildConfig.OWNER_ID
+            val installed = remember { mutableStateListOf<PluginManifest>().apply { addAll(app.plugins.plugins.map { it.manifest }) } }
+            val clipboard = LocalClipboardManager.current
+            val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { readPlugin(it) } }
+            var adminToken by remember { mutableStateOf("") }
             LaunchedEffect(chats) {
                 chats.mapNotNull { it.peerUserId }.distinct().forEach { badgeCache[it] = app.badgeApi.badgesOf(it) }
             }
@@ -65,22 +84,46 @@ class MainActivity : ComponentActivity() {
                         SettingsScreen(
                             s = settings,
                             onChange = { f -> scope.launch { app.settings.update(f) } },
-                            plugins = app.plugins.plugins.map { it.manifest.name },
+                            plugins = installed.map { it.name },
                             isOwner = isOwner,
                             onBack = { nav.popBackStack() },
-                            onPlugins = { /* TODO: экран плагинов + «создать с ИИ» */ },
+                            onPlugins = { nav.navigate("plugins") },
                             onAdmin = { nav.navigate("admin") },
                         )
                     }
-                    composable("admin") {
-                        // adminToken выдаёт сервер после проверки входа владельца (см. backend/README)
-                        val token = "" // TODO: получить после авторизации
-                        AdminScreen(
-                            onGrant = { u, b -> scope.launch { app.badgeApi.grant(token, u, b) } },
-                            onRevoke = { u, b -> scope.launch { app.badgeApi.revoke(token, u, b) } },
+                    composable("plugins") {
+                        PluginsScreen(
+                            plugins = installed,
+                            onPick = { picker.launch(arrayOf("*/*")) },
+                            onCopyPrompt = {
+                                clipboard.setText(AnnotatedString(AI_PLUGIN_PROMPT))
+                                Toast.makeText(this@MainActivity, "Промпт скопирован", Toast.LENGTH_SHORT).show()
+                            },
+                            onUninstall = { id -> app.plugins.uninstall(id); installed.removeAll { it.id == id } },
                             onBack = { nav.popBackStack() },
                         )
                     }
+                    composable("admin") {
+                        // Токен вводит владелец; сервер сам проверяет его (ADMIN_TOKEN в backend/server.js)
+                        AdminScreen(
+                            token = adminToken,
+                            onToken = { adminToken = it },
+                            onGrant = { u, b -> scope.launch { app.badgeApi.grant(adminToken, u, b) } },
+                            onRevoke = { u, b -> scope.launch { app.badgeApi.revoke(adminToken, u, b) } },
+                            onBack = { nav.popBackStack() },
+                        )
+                    }
+                }
+                pending?.let { p ->
+                    PluginInstallDialog(
+                        p.manifest,
+                        onConfirm = {
+                            app.plugins.install(p)
+                            installed.removeAll { it.id == p.manifest.id }; installed += p.manifest
+                            pending = null
+                        },
+                        onCancel = { pending = null },
+                    )
                 }
             }
         }
