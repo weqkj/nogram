@@ -1,0 +1,9 @@
+{
+  "id": "example.signature",
+  "name": "Подпись",
+  "version": "1.0",
+  "author": "nuxoku",
+  "description": "Добавляет подпись в конец исходящих сообщений",
+  "permissions": ["messages.modify"],
+  "hooks": ["onMessageSend"]
+}
